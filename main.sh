@@ -2,9 +2,6 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# https://github.com/taiki-e/parse-changelog/releases
-parse_changelog_version="0.4.9"
-
 bail() {
     echo "::error::$*"
     exit 1
@@ -22,15 +19,16 @@ changelog="${INPUT_CHANGELOG:-}"
 draft="${INPUT_DRAFT:-}"
 branch="${INPUT_BRANCH:-}"
 prefix="${INPUT_PREFIX:-}"
+github_ref="${INPUT_GITHUBREF:-}"
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
     bail "GITHUB_TOKEN not set"
 fi
 
-if [[ "${GITHUB_REF:?}" != "refs/tags/"* ]]; then
-    bail "this action can only be used on 'push' event for 'tags' (GITHUB_REF should start with 'refs/tags/': '${GITHUB_REF}')"
+if [[ "${github_ref:?}" != "refs/tags/"* ]]; then
+    bail "this action can only be used on 'push' event for 'tags' (github_ref should start with 'refs/tags/': '${github_ref}')"
 fi
-tag="${GITHUB_REF#refs/tags/}"
+tag="${github_ref#refs/tags/}"
 
 if [[ ! "${tag}" =~ ^${prefix}-?v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z\.-]+)?(\+[0-9A-Za-z\.-]+)?$ ]]; then
     # TODO: In the next major version, reject underscores in pre-release strings and build metadata.
@@ -77,24 +75,22 @@ if [[ -n "${branch}" ]]; then
 fi
 
 if [[ -n "${changelog}" ]]; then
-    tar="tar"
-    case "${OSTYPE}" in
-        linux*) parse_changelog_target="x86_64-unknown-linux-musl" ;;
-        darwin*)
-            parse_changelog_target="x86_64-apple-darwin"
-            tar="gtar"
-            if ! type -P gtar; then
-                brew install gnu-tar &>/dev/null
-            fi
-            ;;
-        cygwin* | msys*) parse_changelog_target="x86_64-pc-windows-msvc" ;;
-        *) bail "unrecognized OSTYPE '${OSTYPE}'" ;;
-    esac
-    # https://github.com/taiki-e/parse-changelog
-    curl --proto '=https' --tlsv1.2 -fsSL --retry 10 --retry-connrefused "https://github.com/taiki-e/parse-changelog/releases/download/v${parse_changelog_version}/parse-changelog-${parse_changelog_target}.tar.gz" \
-        | "${tar}" xzf -
-    notes=$(./parse-changelog "${changelog}" "${version}")
-    rm -f ./parse-changelog
+    regex='^[#]{1,2}\s'
+    firstmatch=
+    secondmatch=
+    thirdmatch=
+
+    while read line; do
+        if [[ $line =~ $regex && -z "$firstmatch" ]]; then
+            firstmatch=$line
+        elif [[ $line =~ $regex && -z "$secondmatch" ]]; then
+            secondmatch=$line
+        elif [[ $line =~ $regex && -z "$thirdmatch" ]]; then
+            thirdmatch=$line
+        elif [[ -n "$secondmatch" && -z "$thirdmatch" ]]; then
+            echo $line >> CHANGELOG_SMALL.md
+        fi
+    done < $changelog
 fi
 
 # https://cli.github.com/manual/gh_release_view
@@ -104,9 +100,11 @@ if gh release view "${tag}" &>/dev/null; then
 fi
 
 # https://cli.github.com/manual/gh_release_create
-gh release create ${draft_option:-} "${tag}" ${prerelease:-} --title "${title}" --notes "${notes:-}"
+gh release create ${draft_option:-} "${tag}" ${prerelease:-} --title "${title}" -F CHANGELOG_SMALL.md
 
 # set (computed) prefix and version outputs for future step use
 computed_prefix=${tag%"${version}"}
 echo "::set-output name=computed-prefix::${computed_prefix}"
 echo "::set-output name=version::${version}"
+
+rm -rf CHANGELOG_SMALL.md
